@@ -1,0 +1,25 @@
+{
+  "name": "nano-banana-pro-mcp",
+  "version": "1.0.0",
+  "description": "Minimal MCP server for Nano Banana Pro (Gemini 3 Pro Image) generation",
+  "type": "module",
+  "bin": {
+    "nano-banana-pro-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build": "npx tsc",
+    "start": "node build/index.js"
+  },
+  "files": ["build"],
+  "dependencies": {
+    "@google/genai": "^2.11.0",
+    "@modelcontextprotocol/sdk": "^1.11.0",
+    "firebase-admin": "^13.0.0",
+    "sharp": "^0.33.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
