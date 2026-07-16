@@ -188,6 +188,26 @@ function makeFilename(prefix: string): string {
 }
 
 /**
+ * Build an MCP Apps HTML resource block that renders the image inline in the client.
+ * The image is embedded as a data URI (not an external URL) to avoid the widget
+ * sandbox CSP that blocks external image domains.
+ */
+function buildPreviewResource(base64: string, mimeType: string, filename: string) {
+  const html =
+    `<img src="data:${mimeType};base64,${base64}" ` +
+    `alt="generated image" ` +
+    `style="max-width:100%;height:auto;display:block;border-radius:8px" />`;
+  return {
+    type: "resource" as const,
+    resource: {
+      uri: `ui://nano-banana/${filename}`,
+      mimeType: "text/html",
+      text: html,
+    },
+  };
+}
+
+/**
  * Compress an image only if it exceeds MAX_IMAGE_BYTES. Images under the threshold are
  * returned untouched (original format preserved). Over the threshold, it steps JPEG quality
  * down, then resizes if needed, until the file fits.
@@ -433,8 +453,13 @@ server.registerTool(
         : `Image generated, but Firebase Storage is not configured so there is no URL to return. ` +
           `Set SERVICE_ACCOUNT_KEY_PATH and FIREBASE_STORAGE_BUCKET to enable uploads.`;
 
+      // Inline preview (HTML widget with the image as a data URI) + text note with the URL.
+      const previewBase64 = imageBuffer.toString("base64");
       return {
-        content: [{ type: "text" as const, text: note }],
+        content: [
+          buildPreviewResource(previewBase64, finalMime, filename),
+          { type: "text" as const, text: note },
+        ],
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -605,8 +630,12 @@ server.registerTool(
           `Download URL (valid ${SIGNED_URL_MINUTES} min):\n${url}`
         : `Edited image created, but Firebase Storage is not configured so there is no URL to return.`;
 
+      const previewBase64 = imageBuffer.toString("base64");
       return {
-        content: [{ type: "text" as const, text: note }],
+        content: [
+          buildPreviewResource(previewBase64, finalMime, filename),
+          { type: "text" as const, text: note },
+        ],
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
