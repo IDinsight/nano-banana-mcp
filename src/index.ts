@@ -80,14 +80,53 @@ const MAX_IMAGE_BYTES = parseInt(process.env.NANO_BANANA_MAX_IMAGE || "512000", 
 //       FIREBASE_STORAGE_BUCKET, FIREBASE_PROJECT_ID,
 //       FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY
 // Optional:
-//   FIREBASE_SIGNED_URL_MINUTES   signed-URL lifetime in minutes (default 60)
+//   FIREBASE_SIGNED_URL_MINUTES   default signed-URL lifetime in minutes (default 30)
+//   FIREBASE_OBJECT_TTL_DAYS      auto-delete objects older than this many days (default 1)
 // ---------------------------------------------------------------------------
 
-const SIGNED_URL_MINUTES = parseInt(process.env.FIREBASE_SIGNED_URL_MINUTES || "60", 10);
+// Default signed-URL lifetime (minutes). Mutable at runtime via the set_url_lifetime tool.
+let signedUrlMinutes = parseInt(process.env.FIREBASE_SIGNED_URL_MINUTES || "30", 10);
+
+// Auto-delete objects older than this many days (applied as a bucket lifecycle rule).
+const OBJECT_TTL_DAYS = parseInt(process.env.FIREBASE_OBJECT_TTL_DAYS || "1", 10);
 
 // firebase-admin is imported lazily only if configured, so the server runs fine without it.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let firebaseBucket: any = null;
+
+/**
+ * Try to apply an age-based lifecycle rule so uploaded objects auto-delete after OBJECT_TTL_DAYS.
+ * This runs on the bucket itself in Google Cloud, so deletion happens regardless of whether this
+ * server is running. Best-effort: if the service account lacks storage.buckets.update permission,
+ * it logs a warning and the rule must be set manually (see README).
+ */
+async function ensureLifecycleRule(): Promise<void> {
+  if (!firebaseBucket) return;
+  try {
+    const [metadata] = await firebaseBucket.getMetadata();
+    const existing = metadata?.lifecycle?.rule ?? [];
+    // Only set it if a matching age-based delete rule isn't already present.
+    const alreadySet = existing.some(
+      (r: { action?: { type?: string }; condition?: { age?: number } }) =>
+        r.action?.type === "Delete" && r.condition?.age === OBJECT_TTL_DAYS
+    );
+    if (alreadySet) {
+      console.error(`[firebase] lifecycle rule already set (delete after ${OBJECT_TTL_DAYS}d)`);
+      return;
+    }
+    await firebaseBucket.setMetadata({
+      lifecycle: {
+        rule: [{ action: { type: "Delete" }, condition: { age: OBJECT_TTL_DAYS } }],
+      },
+    });
+    console.error(`[firebase] lifecycle rule applied: delete objects after ${OBJECT_TTL_DAYS}d`);
+  } catch (err) {
+    console.error(
+      `[firebase] could not set lifecycle rule (set it manually — see README): ` +
+      `${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
 
 async function initFirebase(): Promise<void> {
   const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
@@ -162,7 +201,7 @@ async function uploadToFirebase(
 
     const [url] = await file.getSignedUrl({
       action: "read",
-      expires: Date.now() + SIGNED_URL_MINUTES * 60 * 1000,
+      expires: Date.now() + signedUrlMinutes * 60 * 1000,
     });
     return url;
   } catch (err) {
@@ -394,6 +433,41 @@ server.registerTool(
   }
 );
 
+// ---- Tool: set_url_lifetime -------------------------------------------------
+
+server.registerTool(
+  "set_url_lifetime",
+  {
+    title: "Set Signed URL Lifetime",
+    description:
+      "Set how long the download URLs returned by generate/edit stay valid, in minutes. " +
+      "Default is 30. Shorten it for tighter confidentiality (a leaked link expires sooner) " +
+      "or lengthen it if you need more time to fetch images. Applies to subsequent calls.",
+    inputSchema: z.object({
+      minutes: z
+        .number()
+        .int()
+        .min(1)
+        .max(10080)
+        .describe("URL lifetime in minutes (1–10080, i.e. up to 7 days). Default 30."),
+    }),
+  },
+  async ({ minutes }) => {
+    const previous = signedUrlMinutes;
+    signedUrlMinutes = minutes;
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `Signed URL lifetime set to ${minutes} minute(s) (was ${previous}).\n` +
+            `New download URLs will expire ${minutes} minute(s) after they are generated.`,
+        },
+      ],
+    };
+  }
+);
+
 // ---- Tool: generate_image ---------------------------------------------------
 
 server.registerTool(
@@ -449,7 +523,8 @@ server.registerTool(
 
       const note = url
         ? `Image generated (${(imageBuffer.length / 1024).toFixed(0)} KB).\n` +
-          `Download URL (valid ${SIGNED_URL_MINUTES} min):\n${url}`
+          `Download URL — expires in ${signedUrlMinutes} min:\n${url}\n` +
+          `(Change the lifetime anytime with set_url_lifetime.)`
         : `Image generated, but Firebase Storage is not configured so there is no URL to return. ` +
           `Set SERVICE_ACCOUNT_KEY_PATH and FIREBASE_STORAGE_BUCKET to enable uploads.`;
 
@@ -547,7 +622,7 @@ server.registerTool(
 
     const summary =
       `Batch complete: ${successCount} succeeded, ${failCount} failed out of ${items.length} total.\n` +
-      `Signed URLs valid ${SIGNED_URL_MINUTES} min.\n\n` +
+      `Signed URLs valid ${signedUrlMinutes} min.\n\n` +
       results.join("\n");
 
     return {
@@ -627,7 +702,7 @@ server.registerTool(
 
       const note = url
         ? `Edited image (${(imageBuffer.length / 1024).toFixed(0)} KB).\n` +
-          `Download URL (valid ${SIGNED_URL_MINUTES} min):\n${url}`
+          `Download URL (valid ${signedUrlMinutes} min):\n${url}`
         : `Edited image created, but Firebase Storage is not configured so there is no URL to return.`;
 
       const previewBase64 = imageBuffer.toString("base64");
@@ -653,6 +728,7 @@ server.registerTool(
 
 async function main() {
   await initFirebase();
+  await ensureLifecycleRule();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Nano Banana Pro MCP server running on stdio");

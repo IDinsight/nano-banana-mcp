@@ -1,47 +1,50 @@
 # Nano Banana Pro MCP Server
 
-A minimal, auditable MCP server that gives Claude Desktop the ability to generate and edit images using Google's **Nano Banana Pro** (Gemini 3 Pro Image) model.
+A minimal, auditable MCP server that gives Claude Desktop the ability to generate and edit images using Google's Gemini image models (Nano Banana / Nano Banana Pro).
 
-~150 lines of TypeScript. No hidden dependencies. You own the code.
+All logic lives in `src/index.ts`. No hidden dependencies — read it before you run it.
 
 ## What it does
 
 | Tool | Description |
 |------|-------------|
-| `set_model` | Switch between Gemini image models |
-| `set_resolution` | Set source resolution (1K/2K/4K) |
-| `generate_image` | Create an image from a text prompt |
-| `generate_image_batch` | Create several images at once |
-| `edit_image` | Edit an image (given its URL) with instructions |
+| `set_model` | Switch between Gemini image models at runtime |
+| `set_resolution` | Set source resolution (`1K` / `2K` / `4K`) |
+| `set_url_lifetime` | Set how long download URLs stay valid (default 30 min) |
+| `generate_image` | Generate an image from a text prompt |
+| `generate_image_batch` | Generate several images from a list of prompts |
+| `edit_image` | Edit an image (fetched from a URL) with instructions |
 
-Generated images are returned inline (so Claude can display them in chat) and saved to `~/nano-banana-output/`.
+Images are never written to local disk. `generate_image` and `edit_image` return an inline
+preview (an MCP Apps HTML widget with the image embedded, rendered in the chat) plus, when
+Firebase Storage is configured, a time-limited signed download URL. `generate_image_batch`
+returns URLs only (no previews). Another environment (e.g. Claude's sandbox) fetches a URL to
+embed the image in a document.
 
-> Images are never written to local disk. Each is returned inline for viewing, and — when Firebase Storage is configured — uploaded there with a signed URL you can fetch from other environments (e.g. to embed in a document).
+Inline preview rendering depends on the client supporting MCP Apps; if it doesn't render, the
+image is still available via the signed URL. Images are compressed only if they exceed the size
+threshold (500KB by default); smaller images are kept as-is.
 
 ## Prerequisites
 
 - **Node.js 18+** — check with `node --version`
-- **Gemini API key** — free from [Google AI Studio](https://aistudio.google.com/apikey). Enable billing for image generation (pay-per-image, no monthly minimum).
+- **Gemini API key** — from [Google AI Studio](https://aistudio.google.com/apikey). Enable billing for image generation (pay-per-image).
+- **(Optional) Firebase Storage** — only needed if you want generated images usable outside the chat (see below).
 
 ## Setup
 
-### 1. Clone and build
+### 1. Build
 
 ```bash
-git clone <your-repo-url> nano-banana-mcp
-cd nano-banana-mcp
 npm install
 npm run build
 ```
 
 ### 2. Configure Claude Desktop
 
-Open your Claude Desktop config file:
-
+Open the config file:
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-
-Add this entry (adjust the path to where you cloned the repo):
 
 ```json
 {
@@ -57,73 +60,93 @@ Add this entry (adjust the path to where you cloned the repo):
 }
 ```
 
-### 3. Restart Claude Desktop
+### 3. Fully quit and reopen Claude Desktop
 
-The server should appear in the MCP tools menu (hammer icon).
+Use Cmd+Q (not just closing the window) — the config is only read at launch.
 
-## Usage examples
-
-Once connected, just ask Claude naturally:
+## Usage
 
 - *"Generate an image of a Senegalese market at sunset"*
 - *"Create a 16:9 hero banner for a blog about climate resilience"*
-- *"Edit ~/nano-banana-output/gen_20260714_a1b2.png — remove the background and add a gradient"*
+- *"Switch to nano-banana-pro and generate a 2K product shot"*
 
 ## Models
 
-The server supports two Gemini image models:
+| Friendly name | Model ID | Notes |
+|---------------|----------|-------|
+| `nano-banana-2` (default) | `gemini-3.1-flash-image-preview` | Fast, good quality |
+| `nano-banana-pro` | `gemini-3-pro-image-preview` | Highest quality, slower |
+| `nano-banana` | `gemini-2.5-flash-image` | Original flash model |
 
-| Model | ID | Quality | Speed | Cost |
-|-------|-----|---------|-------|------|
-| Nano Banana Pro | `gemini-3-pro-image-preview` | Highest | Slower | ~$0.09/image |
-| Nano Banana | `gemini-2.5-flash-image` | Good | Fast | ~$0.04/image |
+Switch at runtime with the `set_model` tool (e.g. "use nano-banana-pro").
 
-By default, `generate_image` uses Pro. Pass `use_pro: false` to switch to the faster Flash model.
+## Optional: Firebase Storage (use images outside the chat)
 
-## Security notes
-
-- Your API key stays local — it's passed via environment variable, never logged or transmitted elsewhere.
-- The server only makes HTTPS calls to `generativelanguage.googleapis.com` (Google's Gemini API).
-- No telemetry, no analytics, no third-party calls.
-- All code is in `src/index.ts` — read it before you run it.
-
-## Project structure
-
-```
-nano-banana-mcp/
-├── src/
-│   └── index.ts      ← the entire server (~150 lines)
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-## License
-
-MIT — do whatever you want with it.
-
-## Optional: Firebase Storage (cross-environment image transfer)
-
-By default, generated images are saved to `~/nano-banana-output/` on the machine running the MCP server. If you want images to be usable in another environment (e.g. embedding in a document built by Claude's sandbox) without manually attaching files, configure Firebase Storage. The server will upload each image and return a time-limited signed URL that the other environment can download directly.
+Inline previews work without Firebase. Firebase is what makes an image usable *outside* the
+chat: each image is uploaded and a signed download URL is returned, which another environment
+(e.g. Claude's sandbox) can fetch to embed in a document.
 
 Point at your service-account JSON key file (recommended):
 
 ```json
 "env": {
-  "GEMINI_API_KEY": "[API_KEY]",
-  "SERVICE_ACCOUNT_KEY_PATH": "/absolute/path/to/firebase-service-account.json",
-  "FIREBASE_STORAGE_BUCKET": "your-project.appspot.com"
+  "GEMINI_API_KEY": "your-api-key-here",
+  "SERVICE_ACCOUNT_KEY_PATH": "/Users/you/keys/firebase-adminsdk.json",
+  "FIREBASE_STORAGE_BUCKET": "your-project.firebasestorage.app"
 }
 ```
 
-Download the JSON key from Firebase Console → Project Settings → Service Accounts → Generate new private key, save it somewhere on your machine, and point `SERVICE_ACCOUNT_KEY_PATH` at it.
+- Download the key from Firebase Console → Project Settings → Service Accounts → Generate new private key.
+- Copy the bucket name exactly from the Storage page (newer projects use `*.firebasestorage.app`, older ones `*.appspot.com`).
+- A leading `~` in the key path is expanded automatically; a full absolute path also works.
+- Alternatively supply `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, and `FIREBASE_PRIVATE_KEY` instead of a key file.
+- Optional: `FIREBASE_SIGNED_URL_MINUTES` (default 30) sets the default download-URL lifetime. Change it at runtime with the `set_url_lifetime` tool.
+- Optional: `FIREBASE_OBJECT_TTL_DAYS` (default 1) — uploaded images auto-delete after this many days via a bucket lifecycle rule (see below).
+- For the download to work, the environment fetching the URL needs outbound access to `storage.googleapis.com`.
 
-Alternatively, supply the individual fields instead of a key file (`FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`, plus `FIREBASE_STORAGE_BUCKET`).
+### Auto-deletion of stored images
 
-Optional: `FIREBASE_SIGNED_URL_MINUTES` (default 60) controls how long the download URL stays valid.
+Images are deleted from the bucket automatically after `FIREBASE_OBJECT_TTL_DAYS` days (default 1) so nothing accumulates indefinitely. The server tries to apply this as a bucket lifecycle rule at startup. If the service account lacks permission to update bucket metadata, apply it once manually with the gcloud CLI:
 
-Notes:
-- The service-account credentials stay in the MCP server process only — they are never sent to Claude or its sandbox. The sandbox only ever sees a plain signed URL.
-- Get the service-account values from Firebase Console → Project Settings → Service Accounts → Generate new private key.
-- If any of the four vars is missing, uploads stay disabled and the server falls back to saving locally.
-- For the download to work, the environment fetching the URL must have outbound network access to `storage.googleapis.com`.
+```bash
+cat > /tmp/lifecycle.json <<'JSON'
+{ "rule": [ { "action": {"type": "Delete"}, "condition": {"age": 1} } ] }
+JSON
+gcloud storage buckets update gs://YOUR_BUCKET --lifecycle-file=/tmp/lifecycle.json
+```
+
+(`age` is in days.) This runs on Google Cloud regardless of whether the MCP server is running.
+
+### Confidentiality notes (important for org rollout)
+
+- Generation sends prompts and receives images via Google's Gemini API; treat prompt content accordingly.
+- Download URLs are **signed URLs** — anyone with the link can open the image until it expires (default 30 min). Keep the lifetime short and avoid pasting URLs into shared/persistent places.
+- All images share one bucket under one service-account key; there is no per-user separation or audit trail. If your images may be sensitive, review this against your data-handling policy before org-wide use.
+
+### Storage rules
+
+The server authenticates with the Admin SDK, which bypasses Storage rules, and hands out signed URLs that carry their own auth. So you can keep rules fully locked down:
+
+```
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}
+```
+
+## Size knob
+
+Set in the `env` block if needed:
+- `NANO_BANANA_MAX_IMAGE` — max stored file size in bytes; larger images are compressed down (default `512000`, i.e. 500KB). Images under the threshold are stored untouched in their original format.
+
+## Security notes
+
+- The Gemini key and Firebase credentials stay in the MCP server process — never sent to Claude or its sandbox (the sandbox only ever sees a plain signed URL).
+- Keep the service-account `.json` out of any git repo or synced folder — it's a real credential.
+- No telemetry, no analytics.
+
+## License
+
+MIT
