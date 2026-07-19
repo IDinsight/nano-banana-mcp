@@ -64,6 +64,17 @@ let currentResolution = "1K";
 // Override with NANO_BANANA_MAX_IMAGE (in bytes). Default 500KB.
 const MAX_IMAGE_BYTES = parseInt(process.env.NANO_BANANA_MAX_IMAGE || "512000", 10);
 
+// Whether generate/edit include an inline image preview (MCP Apps HTML widget) by default.
+// Off → tools return URL/text only, which also keeps the tool result small. Each call can
+// override this with an `inline_preview` argument. Set NANO_BANANA_INLINE_PREVIEW=false to
+// default it off.
+const INLINE_PREVIEW_DEFAULT = process.env.NANO_BANANA_INLINE_PREVIEW !== "false";
+
+// Timeout (ms) for each external operation (Gemini call, Firebase upload, edit-image fetch).
+// A stuck call fails cleanly after this instead of hanging until the MCP client aborts the turn.
+// Override with NANO_BANANA_TIMEOUT_MS. Default 60s.
+const OP_TIMEOUT_MS = parseInt(process.env.NANO_BANANA_TIMEOUT_MS || "60000", 10);
+
 // ---------------------------------------------------------------------------
 // Firebase Storage (optional) — lets images cross into other environments via a URL.
 //
@@ -197,12 +208,20 @@ async function uploadToFirebase(
   try {
     const objectPath = `nano-banana/${filename}`;
     const file = firebaseBucket.file(objectPath);
-    await file.save(buffer, { contentType: mimeType, resumable: false });
+    await withTimeout(
+      file.save(buffer, { contentType: mimeType, resumable: false }),
+      OP_TIMEOUT_MS,
+      "Firebase upload"
+    );
 
-    const [url] = await file.getSignedUrl({
-      action: "read",
-      expires: Date.now() + signedUrlMinutes * 60 * 1000,
-    });
+    const [url] = await withTimeout<[string]>(
+      file.getSignedUrl({
+        action: "read",
+        expires: Date.now() + signedUrlMinutes * 60 * 1000,
+      }),
+      OP_TIMEOUT_MS,
+      "Firebase signed-URL"
+    );
     return url;
   } catch (err) {
     console.error(`Firebase upload failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -224,6 +243,23 @@ function makeFilename(prefix: string): string {
   const ts = now.toISOString().replace(/[-:T]/g, "").slice(0, 15);
   const rand = Math.random().toString(36).slice(2, 6);
   return `${prefix}_${ts}_${rand}.png`;
+}
+
+/**
+ * Race a promise against a timeout. Rejects with a labelled error if it doesn't settle in time,
+ * so a stuck external call fails cleanly instead of hanging until the MCP client gives up.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)),
+      ms
+    );
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
 }
 
 /**
@@ -316,11 +352,11 @@ async function callGemini(
   }
   config.imageConfig = imageConfig;
 
-  const response = await ai.models.generateContent({
-    model,
-    contents,
-    config,
-  });
+  const response = await withTimeout(
+    ai.models.generateContent({ model, contents, config }),
+    OP_TIMEOUT_MS,
+    "Gemini image generation"
+  );
 
   // Extract text and image parts from the response
   let text: string | null = null;
@@ -488,9 +524,13 @@ server.registerTool(
         .string()
         .optional()
         .describe("Source resolution: '1K' (default), '2K', or '4K'. Final file is always compressed to stay small"),
+      inline_preview: z
+        .boolean()
+        .optional()
+        .describe("Whether to include an inline image preview in the response. Defaults to the server's NANO_BANANA_INLINE_PREVIEW setting. Set false to return the URL only (smaller, faster response)."),
     }),
   },
-  async ({ prompt, aspect_ratio, resolution }) => {
+  async ({ prompt, aspect_ratio, resolution, inline_preview }) => {
     try {
       const { text, imageBase64, mimeType } = await callGemini(
         prompt,
@@ -528,14 +568,16 @@ server.registerTool(
         : `Image generated, but Firebase Storage is not configured so there is no URL to return. ` +
           `Set SERVICE_ACCOUNT_KEY_PATH and FIREBASE_STORAGE_BUCKET to enable uploads.`;
 
-      // Inline preview (HTML widget with the image as a data URI) + text note with the URL.
-      const previewBase64 = imageBuffer.toString("base64");
-      return {
-        content: [
-          buildPreviewResource(previewBase64, finalMime, filename),
-          { type: "text" as const, text: note },
-        ],
-      };
+      // Optionally include an inline preview (HTML widget with the image as a data URI).
+      const showPreview = inline_preview ?? INLINE_PREVIEW_DEFAULT;
+      const content: Array<
+        ReturnType<typeof buildPreviewResource> | { type: "text"; text: string }
+      > = [];
+      if (showPreview) {
+        content.push(buildPreviewResource(imageBuffer.toString("base64"), finalMime, filename));
+      }
+      content.push({ type: "text", text: note });
+      return { content };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
@@ -652,12 +694,16 @@ server.registerTool(
         .string()
         .optional()
         .describe("Source resolution: '1K' (default), '2K', or '4K'. Final file is always compressed to stay small"),
+      inline_preview: z
+        .boolean()
+        .optional()
+        .describe("Whether to include an inline image preview in the response. Defaults to the server's NANO_BANANA_INLINE_PREVIEW setting. Set false to return the URL only."),
     }),
   },
-  async ({ source_url, prompt, aspect_ratio, resolution }) => {
+  async ({ source_url, prompt, aspect_ratio, resolution, inline_preview }) => {
     try {
       // Fetch the source image over the network — no disk read.
-      const resp = await fetch(source_url);
+      const resp = await fetch(source_url, { signal: AbortSignal.timeout(OP_TIMEOUT_MS) });
       if (!resp.ok) {
         return {
           content: [{ type: "text" as const, text: `Could not fetch source image (HTTP ${resp.status}).` }],
@@ -705,13 +751,15 @@ server.registerTool(
           `Download URL (valid ${signedUrlMinutes} min):\n${url}`
         : `Edited image created, but Firebase Storage is not configured so there is no URL to return.`;
 
-      const previewBase64 = imageBuffer.toString("base64");
-      return {
-        content: [
-          buildPreviewResource(previewBase64, finalMime, filename),
-          { type: "text" as const, text: note },
-        ],
-      };
+      const showPreview = inline_preview ?? INLINE_PREVIEW_DEFAULT;
+      const content: Array<
+        ReturnType<typeof buildPreviewResource> | { type: "text"; text: string }
+      > = [];
+      if (showPreview) {
+        content.push(buildPreviewResource(imageBuffer.toString("base64"), finalMime, filename));
+      }
+      content.push({ type: "text", text: note });
+      return { content };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {

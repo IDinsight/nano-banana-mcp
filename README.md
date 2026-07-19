@@ -136,10 +136,12 @@ service firebase.storage {
 }
 ```
 
-## Size knob
+## Knobs
 
 Set in the `env` block if needed:
 - `NANO_BANANA_MAX_IMAGE` — max stored file size in bytes; larger images are compressed down (default `512000`, i.e. 500KB). Images under the threshold are stored untouched in their original format.
+- `NANO_BANANA_INLINE_PREVIEW` — whether `generate_image`/`edit_image` include an inline image preview by default (`true` by default; set `false` to return URL/text only, which makes responses smaller and faster). Each call can override this with an `inline_preview` argument.
+- `NANO_BANANA_TIMEOUT_MS` — per-operation timeout in milliseconds for the Gemini call, Firebase upload, and edit-image fetch (default `60000`). A stuck call fails cleanly with a "timed out" error instead of hanging until the client aborts the turn.
 
 ## Security notes
 
