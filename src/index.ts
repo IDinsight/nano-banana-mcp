@@ -596,9 +596,9 @@ server.registerTool(
     title: "Generate Images (Batch)",
     description:
       "Generate multiple images from an array of prompts in a single call. " +
-      "Images are saved to the MCP server's output folder only (NOT your container). " +
-      "Use generate_image individually if you need images in your container. " +
-      "Returns a text summary with server file paths.",
+      "Each image is uploaded to Firebase Storage (when configured) and a signed download URL is returned. " +
+      "Nothing is written to local disk and no inline previews are returned. " +
+      "Returns a text summary with one download URL per prompt.",
     inputSchema: z.object({
       items: z
         .array(

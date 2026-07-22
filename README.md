@@ -100,7 +100,7 @@ Point at your service-account JSON key file (recommended):
 - Copy the bucket name exactly from the Storage page (newer projects use `*.firebasestorage.app`, older ones `*.appspot.com`).
 - A leading `~` in the key path is expanded automatically; a full absolute path also works.
 - Alternatively supply `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, and `FIREBASE_PRIVATE_KEY` instead of a key file.
-- Optional: `FIREBASE_SIGNED_URL_MINUTES` (default 30) sets the default download-URL lifetime. Change it at runtime with the `set_url_lifetime` tool.
+- Optional: `FIREBASE_SIGNED_URL_MINUTES` (default 30) sets the default download-URL lifetime. Change it at runtime with the `set_url_lifetime` tool (accepts 1–10080 minutes, i.e. up to 7 days).
 - Optional: `FIREBASE_OBJECT_TTL_DAYS` (default 1) — uploaded images auto-delete after this many days via a bucket lifecycle rule (see below).
 - For the download to work, the environment fetching the URL needs outbound access to `storage.googleapis.com`.
 
