@@ -136,6 +136,27 @@ service firebase.storage {
 }
 ```
 
+## Remote (HTTP) mode
+
+Besides the default stdio mode above, the server can run as a Streamable HTTP MCP server
+(`node build/http.js`) for central hosting (e.g. Cloud Run). Each MCP session gets its own
+settings, so one user's `set_model` / `set_resolution` / `set_url_lifetime` doesn't affect
+another's. Endpoints: `/mcp` (MCP, POST/GET/DELETE), `/healthz` (unauthenticated health check).
+
+Environment variables (in addition to the ones above):
+
+| Variable | Description |
+|----------|-------------|
+| `PORT` | Port to listen on (default `8080`) |
+| `PUBLIC_URL` | Public base URL of this server, advertised in OAuth protected-resource metadata (e.g. `https://nano-banana-mcp-xyz.run.app`) |
+| `SUPABASE_URL` | Supabase project URL (e.g. `https://xyzcompany.supabase.co`). When set, `/mcp` requires a Supabase-issued Bearer JWT, verified against the project's JWKS (issuer `SUPABASE_URL/auth/v1`, audience `authenticated`) |
+| `ALLOW_UNAUTHENTICATED` | Set to `1` to run without auth when `SUPABASE_URL` is unset — local testing only; the server refuses to start otherwise |
+
+```bash
+# Local test run without auth (never expose this publicly):
+GEMINI_API_KEY=... ALLOW_UNAUTHENTICATED=1 node build/http.js
+```
+
 ## Knobs
 
 Set in the `env` block if needed:
