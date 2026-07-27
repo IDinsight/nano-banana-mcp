@@ -150,7 +150,7 @@ export async function initFirebase(): Promise<void> {
   }
 
   try {
-    const { initializeApp, cert, getApps } = await import("firebase-admin/app");
+    const { initializeApp, applicationDefault, cert, getApps } = await import("firebase-admin/app");
     const { getStorage } = await import("firebase-admin/storage");
 
     // Build the credential from a key file if provided, else from individual vars.
@@ -170,16 +170,21 @@ export async function initFirebase(): Promise<void> {
       const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
       const privateKey = process.env.FIREBASE_PRIVATE_KEY;
       const projectId = process.env.FIREBASE_PROJECT_ID;
-      if (!clientEmail || !privateKey || !projectId) {
-        console.error("[firebase] disabled — no SERVICE_ACCOUNT_KEY_PATH and incomplete FIREBASE_* vars");
-        return;
+      if (clientEmail && privateKey && projectId) {
+        credential = cert({
+          projectId,
+          clientEmail,
+          // Env vars often store the key with literal "\n" — normalize to real newlines.
+          privateKey: privateKey.replace(/\\n/g, "\n"),
+        });
+      } else {
+        // No key file and no explicit credential vars — fall back to Application
+        // Default Credentials. On Cloud Run this is the runtime service account
+        // (no key file needed). Note: signed URLs via ADC use the IAM signBlob
+        // API, so the runtime service account needs roles/iam.serviceAccountTokenCreator.
+        console.error("[firebase] no explicit credentials — using Application Default Credentials");
+        credential = applicationDefault();
       }
-      credential = cert({
-        projectId,
-        clientEmail,
-        // Env vars often store the key with literal "\n" — normalize to real newlines.
-        privateKey: privateKey.replace(/\\n/g, "\n"),
-      });
     }
 
     if (getApps().length === 0) {
