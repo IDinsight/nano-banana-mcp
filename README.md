@@ -136,6 +136,42 @@ service firebase.storage {
 }
 ```
 
+## Production deployment (current state)
+
+The server is **live on Cloud Run**: project `senegal-ci-maths`, region `europe-west1`,
+service `nano-banana-mcp`, capped at one instance.
+
+- **Users connect** via a Claude custom connector pointing at
+  `https://nano-banana-mcp-148764688487.europe-west1.run.app/mcp`, logging in with the same
+  Supabase account as the TLM server (the login page is hosted on the TLM service — one
+  identity system for all MCP servers in this stack).
+- **Merging to `main` does NOT deploy.** CI builds only. To ship an update, from the repo
+  root on `main`:
+
+  ```bash
+  gcloud run deploy nano-banana-mcp --source . --region europe-west1 --project senegal-ci-maths
+  ```
+
+  Existing env vars and public-access settings are preserved. See [`DEPLOY.md`](DEPLOY.md).
+
+### Cost control
+
+Every generated image bills the **shared** `GEMINI_API_KEY` — there are no per-user quotas
+yet; all connector users draw from one pool. Current controls, in order of usefulness:
+
+1. **Hard cap via API quota** (the only true stop): in the GCP project that owns the key →
+   *APIs & Services → Generative Language API → Quotas* → lower *requests per day* to a
+   sane ceiling (e.g. 200/day ≈ worst case ~$25/day on the pro model).
+2. **Budget alerts** on that project's billing account (alerts only — GCP budgets never
+   hard-stop spending).
+3. **Model discipline**: the default model is the cheap Flash tier (a few cents/image);
+   `nano-banana-pro` (~$0.09/image) is only used when a user asks for it. The batch tool
+   multiplies cost by the number of prompts — the fastest way to burn budget.
+4. Cloud Run itself is negligible (scale-to-zero, one instance max).
+
+Per-user rate limiting inside the server (per Supabase identity) is the natural next step
+if usage grows — the identity is already on every request.
+
 ## Remote (HTTP) mode
 
 Besides the default stdio mode above, the server can run as a Streamable HTTP MCP server
