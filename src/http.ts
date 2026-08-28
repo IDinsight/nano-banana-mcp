@@ -150,11 +150,25 @@ app.post("/mcp", ...mcpMiddleware, async (req, res) => {
       return;
     }
 
-    if (sessionId || !isInitializeRequest(req.body)) {
-      // Unknown session id, or a non-initialize request without one.
+    if (sessionId) {
+      // A session id was sent but we hold no such session. This is normal after a
+      // redeploy or a Cloud Run cold-start (sessions live in memory and are lost when
+      // the instance restarts). The MCP spec says the server MUST answer 404 here, and
+      // clients MUST then start a new session with a fresh initialize. Answering 400
+      // instead leaves well-behaved clients stuck retrying a dead session forever.
+      res.status(404).json({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Session not found — reinitialize" },
+        id: null,
+      });
+      return;
+    }
+
+    if (!isInitializeRequest(req.body)) {
+      // No session id and not an initialize request — a malformed first message.
       res.status(400).json({
         jsonrpc: "2.0",
-        error: { code: -32000, message: "Bad Request: no valid session ID provided" },
+        error: { code: -32000, message: "Bad Request: no session ID and not an initialize request" },
         id: null,
       });
       return;
@@ -194,7 +208,11 @@ const handleSessionRequest: RequestHandler = async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   const entry = sessionId ? sessions.get(sessionId) : undefined;
   if (!entry) {
-    res.status(400).send("Invalid or missing session ID");
+    // 404 when a session id was given but is unknown (expired/lost), so the client
+    // reinitializes; 400 when no session id was provided at all.
+    res.status(sessionId ? 404 : 400).send(
+      sessionId ? "Session not found — reinitialize" : "Missing session ID"
+    );
     return;
   }
   await sessionStorage.run(entry.settings, () => entry.transport.handleRequest(req, res));
