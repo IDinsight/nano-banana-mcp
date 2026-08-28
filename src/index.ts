@@ -198,15 +198,27 @@ export async function initFirebase(): Promise<void> {
 }
 
 /**
+ * Outcome of an upload attempt. The three cases are kept distinct so callers can report
+ * them differently: a successful upload, Firebase being disabled (not configured), or an
+ * upload that was attempted but failed (bad credentials, permissions, timeout, …).
+ * The previous contract collapsed the last two into `null`, so a genuine failure was
+ * indistinguishable from "not configured" — which sent users looking in the wrong place.
+ */
+type UploadResult =
+  | { ok: true; url: string }
+  | { ok: false; reason: "disabled" }
+  | { ok: false; reason: "failed"; error: string };
+
+/**
  * Upload a buffer to Firebase Storage and return a time-limited signed URL.
- * Returns null (and never throws) if Firebase isn't configured or the upload fails.
+ * Never throws — failures are returned as a typed result the caller can surface.
  */
 async function uploadToFirebase(
   buffer: Buffer,
   filename: string,
   mimeType: string
-): Promise<string | null> {
-  if (!firebaseBucket) return null;
+): Promise<UploadResult> {
+  if (!firebaseBucket) return { ok: false, reason: "disabled" };
   try {
     const objectPath = `nano-banana/${filename}`;
     const file = firebaseBucket.file(objectPath);
@@ -224,10 +236,11 @@ async function uploadToFirebase(
       OP_TIMEOUT_MS,
       "Firebase signed-URL"
     );
-    return url;
+    return { ok: true, url };
   } catch (err) {
-    console.error(`Firebase upload failed: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(`Firebase upload failed: ${error}`);
+    return { ok: false, reason: "failed", error };
   }
 }
 
@@ -570,14 +583,18 @@ export function buildServer(): McpServer {
 
         // Upload to Firebase Storage and get a signed URL. Nothing is written to local disk.
         const filename = makeFilename("gen");
-        const url = await uploadToFirebase(imageBuffer, filename, finalMime);
+        const upload = await uploadToFirebase(imageBuffer, filename, finalMime);
 
-        const note = url
-          ? `Image generated (${(imageBuffer.length / 1024).toFixed(0)} KB).\n` +
-            `Download URL — expires in ${getSettings().signedUrlMinutes} min:\n${url}\n` +
+        const sizeKb = (imageBuffer.length / 1024).toFixed(0);
+        const note = upload.ok
+          ? `Image generated (${sizeKb} KB).\n` +
+            `Download URL — expires in ${getSettings().signedUrlMinutes} min:\n${upload.url}\n` +
             `(Change the lifetime anytime with set_url_lifetime.)`
-          : `Image generated, but Firebase Storage is not configured so there is no URL to return. ` +
-            `Set SERVICE_ACCOUNT_KEY_PATH and FIREBASE_STORAGE_BUCKET to enable uploads.`;
+          : upload.reason === "disabled"
+          ? `Image generated (${sizeKb} KB), but Firebase Storage is not configured so there is no URL to return. ` +
+            `Set SERVICE_ACCOUNT_KEY_PATH and FIREBASE_STORAGE_BUCKET to enable uploads.`
+          : `Image generated (${sizeKb} KB), but the upload to Firebase Storage failed, so there is no URL to return.\n` +
+            `Error: ${upload.error}`;
 
         // Optionally include an inline preview (HTML widget with the image as a data URI).
         const showPreview = inline_preview ?? INLINE_PREVIEW_DEFAULT;
@@ -658,14 +675,20 @@ export function buildServer(): McpServer {
 
           // Upload to Firebase Storage; no local disk.
           const filename = makeFilename("batch");
-          const url = await uploadToFirebase(imageBuffer, filename, finalMime);
+          const upload = await uploadToFirebase(imageBuffer, filename, finalMime);
 
-          successCount++;
-          results.push(
-            url
-              ? `${label} OK — ${url}\n    Prompt: "${item.prompt}"`
-              : `${label} OK but no URL (Firebase not configured) — "${item.prompt}"`
-          );
+          if (upload.ok) {
+            successCount++;
+            results.push(`${label} OK — ${upload.url}\n    Prompt: "${item.prompt}"`);
+          } else if (upload.reason === "disabled") {
+            // The image generated fine; there's just nowhere to store it. Still a success.
+            successCount++;
+            results.push(`${label} OK but no URL (Firebase not configured) — "${item.prompt}"`);
+          } else {
+            // Generation succeeded but the upload failed — this item yields no usable URL.
+            failCount++;
+            results.push(`${label} UPLOAD FAILED — "${item.prompt}"\n    Error: ${upload.error}`);
+          }
         } catch (err) {
           failCount++;
           const msg = err instanceof Error ? err.message : String(err);
@@ -680,6 +703,9 @@ export function buildServer(): McpServer {
 
       return {
         content: [{ type: "text" as const, text: summary }],
+        // Flag the whole call as an error only if nothing succeeded, so a caller checking
+        // `isError` can tell a total failure from a partial one without parsing the text.
+        ...(successCount === 0 ? { isError: true } : {}),
       };
     }
   );
@@ -755,12 +781,16 @@ export function buildServer(): McpServer {
 
         // Upload the edited image; no disk.
         const filename = makeFilename("edit");
-        const url = await uploadToFirebase(imageBuffer, filename, finalMime);
+        const upload = await uploadToFirebase(imageBuffer, filename, finalMime);
 
-        const note = url
-          ? `Edited image (${(imageBuffer.length / 1024).toFixed(0)} KB).\n` +
-            `Download URL (valid ${getSettings().signedUrlMinutes} min):\n${url}`
-          : `Edited image created, but Firebase Storage is not configured so there is no URL to return.`;
+        const sizeKb = (imageBuffer.length / 1024).toFixed(0);
+        const note = upload.ok
+          ? `Edited image (${sizeKb} KB).\n` +
+            `Download URL (valid ${getSettings().signedUrlMinutes} min):\n${upload.url}`
+          : upload.reason === "disabled"
+          ? `Edited image created (${sizeKb} KB), but Firebase Storage is not configured so there is no URL to return.`
+          : `Edited image created (${sizeKb} KB), but the upload to Firebase Storage failed, so there is no URL to return.\n` +
+            `Error: ${upload.error}`;
 
         const showPreview = inline_preview ?? INLINE_PREVIEW_DEFAULT;
         const content: Array<
@@ -785,15 +815,68 @@ export function buildServer(): McpServer {
 }
 
 // ---------------------------------------------------------------------------
+// Process-level resilience (shared by both entry points)
+//
+// A long-lived server must not die silently on a stray async error. If the process
+// exits, every in-flight and future request fails with an opaque error until it's
+// restarted. These guards keep it alive where that's safe, and where it isn't, they
+// log the real cause and shut down gracefully. `shutdown` is the entry point's own
+// close routine (stdio server, or the HTTP server + sessions).
+// ---------------------------------------------------------------------------
+
+export function installProcessGuards(
+  shutdown: (code: number, reason: string) => void | Promise<void>
+): void {
+  let shuttingDown = false;
+  const once = (code: number, reason: string): void => {
+    if (shuttingDown) return; // ignore repeated signals / a crash during shutdown
+    shuttingDown = true;
+    void Promise.resolve(shutdown(code, reason)).catch((err) => {
+      console.error(`[shutdown] error while closing: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(code);
+    });
+  };
+
+  // A rejected promise with no handler is almost always non-fatal here (a background
+  // upload, an aborted fetch). Log it and keep serving rather than letting Node kill
+  // the process — that opaque, whole-server death is exactly what we're avoiding.
+  process.on("unhandledRejection", (reason) => {
+    console.error(
+      `[unhandledRejection] ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`
+    );
+  });
+
+  // An uncaught exception leaves the process in an undefined state, so we don't keep
+  // running — but we exit gracefully with the cause logged, and a non-zero code tells
+  // the host (e.g. Cloud Run) to restart us.
+  process.on("uncaughtException", (err) => {
+    console.error(`[uncaughtException] ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+    once(1, "uncaught exception");
+  });
+
+  // Terminal signals (client disconnect, Cloud Run stop): shut down cleanly, exit 0.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => once(0, `received ${signal}`));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Start the server over stdio
 // ---------------------------------------------------------------------------
 
 async function main() {
   await initFirebase();
   await ensureLifecycleRule();
+  const server = buildServer();
   const transport = new StdioServerTransport();
-  await buildServer().connect(transport);
+  await server.connect(transport);
   console.error("Nano Banana Pro MCP server running on stdio");
+
+  installProcessGuards(async (code, reason) => {
+    console.error(`[shutdown] ${reason} — closing server`);
+    await server.close();
+    process.exit(code);
+  });
 }
 
 // Only start the stdio server when this file is the entry point (node build/index.js).
