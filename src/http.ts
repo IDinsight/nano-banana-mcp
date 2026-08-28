@@ -31,7 +31,7 @@ import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.
 import type { OAuthTokenVerifier } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { buildServer, initFirebase, ensureLifecycleRule } from "./index.js";
+import { buildServer, initFirebase, ensureLifecycleRule, installProcessGuards } from "./index.js";
 import { createSessionSettings, sessionStorage, SessionSettings } from "./session.js";
 
 // ---------------------------------------------------------------------------
@@ -210,9 +210,27 @@ app.delete("/mcp", ...mcpMiddleware, handleSessionRequest);
 async function main() {
   await initFirebase();
   await ensureLifecycleRule();
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
     console.error(`Nano Banana Pro MCP server (Streamable HTTP) listening on port ${PORT}`);
     console.error(`  MCP endpoint: ${PUBLIC_URL}/mcp`);
+  });
+
+  // Keep the process alive on stray async errors, and shut down cleanly on the SIGTERM
+  // Cloud Run sends when draining an instance: stop accepting connections, close open
+  // MCP sessions, then exit. A failsafe timer forces exit if lingering keep-alive
+  // sockets keep httpServer.close() from completing.
+  installProcessGuards(async (code, reason) => {
+    console.error(`[shutdown] ${reason} — closing HTTP server and ${sessions.size} session(s)`);
+    setTimeout(() => process.exit(code), 8000).unref();
+    for (const { transport } of sessions.values()) {
+      try {
+        await transport.close();
+      } catch {
+        /* best effort — we're going down anyway */
+      }
+    }
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    process.exit(code);
   });
 }
 
